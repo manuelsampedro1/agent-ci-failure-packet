@@ -1,0 +1,12 @@
+Run python -m unittest discover -s tests
++ python -m unittest discover -s tests
+FAIL: test_blocks_unexpected_paths (tests.test_publish_guard.PublishGuardTests)
+Traceback (most recent call last):
+  File "tests/test_publish_guard.py", line 42, in test_blocks_unexpected_paths
+    self.assertEqual(exit_code, 1)
+AssertionError: 0 != 1
+
+Ran 8 tests in 0.032s
+FAILED (failures=1)
+Process completed with exit code 1.
+
