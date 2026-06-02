@@ -8,8 +8,8 @@ from pathlib import Path
 from agent_ci_failure_packet.cli import build_packet, main
 
 
-SAMPLE_LOG = """Run python -m unittest discover -s tests
-+ python -m unittest discover -s tests
+SAMPLE_LOG = """Run make test
++ make test
 FAIL: test_blocks_unexpected_paths (tests.test_publish_guard.PublishGuardTests)
 Traceback (most recent call last):
   File "tests/test_publish_guard.py", line 42, in test_blocks_unexpected_paths
@@ -26,12 +26,12 @@ class FailurePacketTests(unittest.TestCase):
     def test_build_packet_extracts_signals(self) -> None:
         packet = build_packet(SAMPLE_LOG, "Publish guard")
 
-        self.assertIn("python -m unittest discover -s tests", packet.failing_commands)
+        self.assertIn("make test", packet.failing_commands)
         self.assertTrue(any("AssertionError" in error for error in packet.error_signals))
         self.assertEqual(packet.referenced_files[0].path, "tests/test_publish_guard.py")
         self.assertEqual(packet.referenced_files[0].line, 42)
         self.assertTrue(any("FAILED" in summary for summary in packet.test_summaries))
-        self.assertIn("python -m unittest discover -s tests", packet.suggested_checks)
+        self.assertIn("make test", packet.suggested_checks)
 
     def test_cli_json_writes_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,4 +69,3 @@ class FailurePacketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

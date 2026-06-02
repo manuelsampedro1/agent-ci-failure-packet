@@ -18,14 +18,14 @@ The tool is local-first and dependency-free. It does not call CI APIs; it works 
 ## Install
 
 ```sh
-python -m pip install --upgrade pip
-python -m pip install -e .
+python3 -m pip install --upgrade pip
+python3 -m pip install -e .
 ```
 
 Or run without installing:
 
 ```sh
-PYTHONPATH=src python -m agent_ci_failure_packet examples/ci-failure.log
+PYTHONPATH=src python3 -m agent_ci_failure_packet examples/ci-failure.log
 ```
 
 ## Usage
@@ -55,7 +55,7 @@ pbpaste | agent-ci-failure-packet - --title "Latest CI failure"
 
 ## Failing Commands
 
-- `python -m unittest discover -s tests`
+- `make test`
 
 ## Error Signals
 
@@ -75,16 +75,19 @@ Fix the CI failure using the evidence above. Keep the change scoped, rerun the f
 ## Development
 
 ```sh
-PYTHONPATH=src python -m unittest discover -s tests
-PYTHONPATH=src python -m agent_ci_failure_packet examples/ci-failure.log --format json
+make test
+make lint
+make build
+make smoke
 ```
+
+`make smoke` renders the sample CI log as a JSON failure packet.
 
 ## Fit With The Agent Workflow Stack
 
-- `agent-task-contract`: make the task specific before the run.
+- `agent-task-contract`: clarify the task before the run.
 - `repo-flightcheck`: confirm the repo is ready.
 - `agent-secret-sentinel`: catch secret leaks in diffs.
 - `agent-ci-failure-packet`: turn CI failures into focused retry context.
 - `diff-to-eval`: save useful failures as future eval cases.
 - `agent-run-ledger`: keep the run auditable.
-
