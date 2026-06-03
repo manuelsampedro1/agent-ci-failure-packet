@@ -10,6 +10,7 @@ When CI fails after an agent change, the next run needs the right context: faili
 - Error, failure, traceback, and exception lines.
 - File references with line numbers.
 - Test summary lines.
+- Verified failed `agent-command-receipt.v1` evidence.
 - Suggested next checks.
 - A compact prompt block for the next agent run.
 
@@ -48,10 +49,30 @@ Read from stdin:
 pbpaste | agent-ci-failure-packet - --title "Latest CI failure"
 ```
 
+Build from a failed command receipt and verify the referenced log before using it:
+
+```sh
+agent-ci-failure-packet \
+  --receipt examples/failed-receipt.json \
+  --receipt-base-dir . \
+  --title "Receipt-backed CI failure"
+```
+
+The receipt path is strict: it must use `agent-command-receipt.v1`, have status
+`fail`, include at least one non-empty evidence file, and match each evidence
+file's recorded size and SHA-256 hash.
+
 ## Example Output
 
 ```md
 # CI Failure Packet: Publish guard CI failure
+
+## Command Receipt
+
+- Receipt: `examples/failed-receipt.json`
+- Status: `fail`
+- Exit code: `1`
+- Verified evidence files: `examples/ci-failure.log`
 
 ## Failing Commands
 
@@ -81,13 +102,15 @@ make build
 make smoke
 ```
 
-`make smoke` renders the sample CI log as a JSON failure packet.
+`make smoke` renders the sample CI log and the sample failed command receipt as
+JSON failure packets.
 
 ## Fit With The Agent Workflow Stack
 
 - `agent-task-contract`: clarify the task before the run.
 - `repo-flightcheck`: confirm the repo is ready.
 - `agent-secret-sentinel`: catch secret leaks in diffs.
+- `agent-command-receipt`: verify that the failed log being reused has not drifted.
 - `agent-ci-failure-packet`: turn CI failures into focused retry context.
 - `diff-to-eval`: save useful failures as future eval cases.
 - `agent-run-ledger`: keep the run auditable.

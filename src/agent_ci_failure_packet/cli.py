@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
+
+COMMAND_RECEIPT_SCHEMA = "agent-command-receipt.v1"
 
 ERROR_PATTERNS = [
     r"\bERROR\b",
@@ -40,9 +44,19 @@ class FileRef:
 
 
 @dataclass(frozen=True)
+class CommandReceiptEvidence:
+    path: str
+    command: str
+    status: str
+    exit_code: int | None
+    evidence_files: list[str]
+
+
+@dataclass(frozen=True)
 class FailurePacket:
     schema_version: str
     title: str
+    command_receipt: CommandReceiptEvidence | None
     failing_commands: list[str]
     error_signals: list[str]
     referenced_files: list[FileRef]
@@ -55,6 +69,99 @@ def read_log(path: str) -> str:
     if path == "-":
         return sys.stdin.read()
     return Path(path).read_text(encoding="utf-8", errors="replace")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_json_object(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("command receipt JSON must be an object")
+    return data
+
+
+def resolve_evidence_path(base_dir: Path, path_text: str) -> Path:
+    candidate = Path(path_text)
+    if candidate.is_absolute():
+        return candidate
+    return base_dir / candidate
+
+
+def read_failed_receipt(
+    receipt_path: Path,
+    base_dir: Path,
+) -> tuple[str, CommandReceiptEvidence]:
+    receipt = parse_json_object(receipt_path)
+    errors: list[str] = []
+    log_parts: list[str] = []
+    checked_paths: list[str] = []
+
+    if receipt.get("schema_version") != COMMAND_RECEIPT_SCHEMA:
+        errors.append(f"expected schema_version {COMMAND_RECEIPT_SCHEMA}")
+
+    status = str(receipt.get("status") or "")
+    if status != "fail":
+        errors.append(f"receipt status is {status or 'missing'}; expected fail")
+
+    evidence = receipt.get("evidence")
+    if not isinstance(evidence, list):
+        errors.append("receipt evidence must be a list")
+        evidence = []
+    elif not evidence:
+        errors.append("receipt must include at least one evidence file")
+
+    for item in evidence:
+        if not isinstance(item, dict):
+            errors.append("evidence item is not an object")
+            continue
+
+        path_text = str(item.get("path") or "")
+        expected_size = item.get("size_bytes")
+        expected_sha = str(item.get("sha256") or "")
+        if not path_text:
+            errors.append("evidence item is missing a path")
+            continue
+
+        path = resolve_evidence_path(base_dir, path_text)
+        if not path.exists():
+            errors.append(f"evidence file is missing: {path_text}")
+            continue
+        if not path.is_file():
+            errors.append(f"evidence path is not a file: {path_text}")
+            continue
+
+        actual_size = path.stat().st_size
+        actual_sha = sha256_file(path)
+        if actual_size == 0:
+            errors.append(f"evidence file is empty: {path_text}")
+        if expected_size != actual_size:
+            errors.append(
+                f"evidence size changed for {path_text}: "
+                f"expected {expected_size}, got {actual_size}"
+            )
+        if expected_sha != actual_sha:
+            errors.append(f"evidence hash changed for {path_text}")
+
+        checked_paths.append(Path(path_text).as_posix())
+        log_parts.append(path.read_text(encoding="utf-8", errors="replace"))
+
+    if errors:
+        raise ValueError("invalid command receipt: " + "; ".join(errors))
+
+    exit_code = receipt.get("exit_code")
+    return "\n".join(log_parts), CommandReceiptEvidence(
+        path=receipt_path.as_posix(),
+        command=str(receipt.get("command") or ""),
+        status=status,
+        exit_code=exit_code if isinstance(exit_code, int) else None,
+        evidence_files=checked_paths,
+    )
 
 
 def compact(line: str, limit: int = 220) -> str:
@@ -150,9 +257,15 @@ def build_prompt(title: str, errors: list[str], checks: list[str]) -> str:
     )
 
 
-def build_packet(log_text: str, title: str) -> FailurePacket:
+def build_packet(
+    log_text: str,
+    title: str,
+    command_receipt: CommandReceiptEvidence | None = None,
+) -> FailurePacket:
     lines = log_text.splitlines()
     commands = extract_commands(lines)
+    if command_receipt and command_receipt.command:
+        commands = unique([command_receipt.command] + commands, 8)
     errors = extract_errors(lines)
     refs = extract_file_refs(lines)
     summaries = extract_test_summaries(lines)
@@ -160,6 +273,7 @@ def build_packet(log_text: str, title: str) -> FailurePacket:
     return FailurePacket(
         schema_version="agent-ci-failure-packet.v1",
         title=title,
+        command_receipt=command_receipt,
         failing_commands=commands,
         error_signals=errors,
         referenced_files=refs,
@@ -171,6 +285,19 @@ def build_packet(log_text: str, title: str) -> FailurePacket:
 
 def render_markdown(packet: FailurePacket) -> str:
     lines = [f"# CI Failure Packet: {packet.title}", ""]
+
+    if packet.command_receipt:
+        receipt = packet.command_receipt
+        evidence_files = ", ".join(f"`{path}`" for path in receipt.evidence_files)
+        lines.extend([
+            "## Command Receipt",
+            "",
+            f"- Receipt: `{receipt.path}`",
+            f"- Status: `{receipt.status}`",
+            f"- Exit code: `{receipt.exit_code}`",
+            f"- Verified evidence files: {evidence_files}",
+            "",
+        ])
 
     sections: list[tuple[str, list[str]]] = [
         ("Failing Commands", [f"`{command}`" for command in packet.failing_commands]),
@@ -194,29 +321,56 @@ def render_markdown(packet: FailurePacket) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-ci-failure-packet")
-    parser.add_argument("log", help="Path to CI log, or '-' to read from stdin.")
+    parser.add_argument("log", nargs="?", help="Path to CI log, or '-' to read from stdin.")
     parser.add_argument("--title", default="CI failure", help="Packet title.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--output", help="Write output to this path instead of stdout.")
+    parser.add_argument(
+        "--receipt",
+        help="Read a failed agent-command-receipt.v1 JSON file and verify its evidence.",
+    )
+    parser.add_argument(
+        "--receipt-base-dir",
+        default=".",
+        help="Base directory used to resolve relative receipt evidence paths.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    log_text = read_log(args.log)
-    if not log_text.strip():
-        print("No CI log content provided.", file=sys.stderr)
+    try:
+        if args.log and args.receipt:
+            print("Use either a log path or --receipt, not both.", file=sys.stderr)
+            return 2
+        if args.receipt:
+            log_text, command_receipt = read_failed_receipt(
+                Path(args.receipt),
+                Path(args.receipt_base_dir),
+            )
+        elif args.log:
+            log_text = read_log(args.log)
+            command_receipt = None
+        else:
+            print("Either a log path or --receipt is required.", file=sys.stderr)
+            return 2
+
+        if not log_text.strip():
+            print("No CI log content provided.", file=sys.stderr)
+            return 2
+
+        packet = build_packet(log_text, args.title, command_receipt=command_receipt)
+        output = json.dumps(asdict(packet), indent=2) if args.format == "json" else render_markdown(packet)
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(output if output.endswith("\n") else output + "\n", encoding="utf-8")
+            print(output_path)
+        else:
+            print(output, end="" if output.endswith("\n") else "\n")
+        return 0
+    except (FileNotFoundError, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(f"agent-ci-failure-packet: {exc}", file=sys.stderr)
         return 2
-
-    packet = build_packet(log_text, args.title)
-    output = json.dumps(asdict(packet), indent=2) if args.format == "json" else render_markdown(packet)
-
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(output if output.endswith("\n") else output + "\n", encoding="utf-8")
-        print(output_path)
-    else:
-        print(output, end="" if output.endswith("\n") else "\n")
-    return 0

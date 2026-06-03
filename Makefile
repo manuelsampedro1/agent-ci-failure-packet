@@ -12,3 +12,4 @@ build: lint
 
 smoke:
 	PYTHONPATH=src $(PYTHON) -m agent_ci_failure_packet examples/ci-failure.log --title "Publish guard CI failure" --format json > /tmp/agent-ci-failure-packet.json
+	PYTHONPATH=src $(PYTHON) -m agent_ci_failure_packet --receipt examples/failed-receipt.json --receipt-base-dir . --title "Receipt-backed CI failure" --format json > /tmp/agent-ci-failure-packet-receipt.json

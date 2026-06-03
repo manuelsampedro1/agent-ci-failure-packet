@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -23,9 +24,38 @@ Process completed with exit code 1.
 
 
 class FailurePacketTests(unittest.TestCase):
+    def write_receipt(
+        self,
+        directory: str,
+        evidence_name: str = "ci.log",
+        status: str = "fail",
+    ) -> Path:
+        evidence = Path(directory) / evidence_name
+        evidence.write_text(SAMPLE_LOG, encoding="utf-8")
+        receipt_path = Path(directory) / "receipt.json"
+        receipt_path.write_text(
+            json.dumps({
+                "schema_version": "agent-command-receipt.v1",
+                "command": "make test",
+                "status": status,
+                "exit_code": 1 if status == "fail" else 0,
+                "cwd": ".",
+                "created_at": "2026-06-03T00:00:00Z",
+                "notes": [],
+                "evidence": [{
+                    "path": evidence_name,
+                    "size_bytes": evidence.stat().st_size,
+                    "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+                }],
+            }),
+            encoding="utf-8",
+        )
+        return receipt_path
+
     def test_build_packet_extracts_signals(self) -> None:
         packet = build_packet(SAMPLE_LOG, "Publish guard")
 
+        self.assertIsNone(packet.command_receipt)
         self.assertIn("make test", packet.failing_commands)
         self.assertTrue(any("AssertionError" in error for error in packet.error_signals))
         self.assertEqual(packet.referenced_files[0].path, "tests/test_publish_guard.py")
@@ -55,6 +85,67 @@ class FailurePacketTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["schema_version"], "agent-ci-failure-packet.v1")
         self.assertEqual(payload["title"], "Publish guard")
+        self.assertIsNone(payload["command_receipt"])
+
+    def test_cli_builds_packet_from_failed_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt_path = self.write_receipt(tmp)
+            output_path = Path(tmp) / "packet.json"
+
+            with redirect_stdout(StringIO()):
+                exit_code = main([
+                    "--receipt",
+                    str(receipt_path),
+                    "--receipt-base-dir",
+                    tmp,
+                    "--title",
+                    "Receipt-backed CI failure",
+                    "--format",
+                    "json",
+                    "--output",
+                    str(output_path),
+                ])
+
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["command_receipt"]["status"], "fail")
+        self.assertEqual(payload["command_receipt"]["evidence_files"], ["ci.log"])
+        self.assertIn("make test", payload["failing_commands"])
+        self.assertTrue(any("AssertionError" in error for error in payload["error_signals"]))
+
+    def test_cli_rejects_non_failed_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt_path = self.write_receipt(tmp, status="pass")
+            stderr = StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main([
+                    "--receipt",
+                    str(receipt_path),
+                    "--receipt-base-dir",
+                    tmp,
+                ])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("expected fail", stderr.getvalue())
+
+    def test_cli_rejects_receipt_evidence_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt_path = self.write_receipt(tmp)
+            Path(tmp, "ci.log").write_text("changed log\n", encoding="utf-8")
+            stderr = StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = main([
+                    "--receipt",
+                    str(receipt_path),
+                    "--receipt-base-dir",
+                    tmp,
+                ])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("evidence hash changed", stderr.getvalue())
 
     def test_empty_log_returns_usage_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -65,6 +156,13 @@ class FailurePacketTests(unittest.TestCase):
                 exit_code = main([str(log_path)])
 
         self.assertEqual(exit_code, 2)
+
+    def test_missing_log_or_receipt_returns_usage_error(self) -> None:
+        with redirect_stderr(StringIO()) as stderr:
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Either a log path or --receipt is required", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,18 @@
+{
+  "command": "make test",
+  "created_at": "2026-06-03T00:00:00Z",
+  "cwd": ".",
+  "evidence": [
+    {
+      "path": "examples/ci-failure.log",
+      "sha256": "955d06533465221846034909515f8e2d6adb6b9c031245a187eadb730c48e987",
+      "size_bytes": 357
+    }
+  ],
+  "exit_code": 1,
+  "notes": [
+    "Sample failed CI output for receipt-backed packet generation."
+  ],
+  "schema_version": "agent-command-receipt.v1",
+  "status": "fail"
+}
